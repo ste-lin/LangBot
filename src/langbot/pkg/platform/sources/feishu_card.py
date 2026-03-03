@@ -529,6 +529,72 @@ class FeishuCardBuilder:
         """设置是否支持多次更新"""
         self.config["update_multi"] = value
         return self
+    
+    @classmethod
+    def from_json(cls, json_str: str) -> "FeishuCardBuilder":
+        """从 JSON 字符串加载卡片"""
+        card_data = json.loads(json_str)
+        return cls.from_dict(card_data)
+    
+    @classmethod
+    def from_dict(cls, card_data: Dict) -> "FeishuCardBuilder":
+        """从字典加载卡片"""
+        builder = cls()
+        
+        # 加载 config
+        if "config" in card_data:
+            builder.config = card_data["config"]
+        
+        # 加载 header
+        if "header" in card_data:
+            builder.header = card_data["header"]
+        
+        # 加载 elements
+        if "elements" in card_data:
+            builder.elements = card_data["elements"]
+        
+        return builder
+    
+    @classmethod
+    def from_card_builder_url(cls, url: str) -> Optional["FeishuCardBuilder"]:
+        """从飞书卡片搭建器 URL 解析（需要手动粘贴 JSON）"""
+        # 飞书卡片搭建器生成的是 JSON，可以直接用 from_json 导入
+        # 此方法用于提示用户如何获取 JSON
+        return None
+    
+    @staticmethod
+    def import_from_clipboard(json_str: str) -> Dict:
+        """
+        从剪贴板导入（飞书卡片搭建器 JSON）
+        
+        使用方法：
+        1. 打开飞书开放平台卡片搭建器
+        2. 设计你的卡片
+        3. 点击"复制 JSON"
+        4. 粘贴到代码中
+        
+        示例：
+        ```python
+        card_json = '''
+        {
+          "header": {...},
+          "elements": [...]
+        }
+        '''
+        card = FeishuCardBuilder.import_from_clipboard(card_json)
+        ```
+        """
+        try:
+            card_data = json.loads(json_str)
+            return {
+                "success": True,
+                "card": card_data
+            }
+        except json.JSONDecodeError as e:
+            return {
+                "success": False,
+                "error": f"JSON 解析失败: {str(e)}"
+            }
 
 
 # ==================== 回调管理器 ====================
@@ -1272,3 +1338,290 @@ def build_card_response(
             }
         }
     }, ensure_ascii=False)
+
+
+# ==================== 模板市场 ====================
+
+class TemplateMarket:
+    """飞书卡片模板市场"""
+    
+    # 内置模板分类
+    CATEGORY_CUSTOMER_SERVICE = "customer_service"  # 客服类
+    CATEGORY_BUSINESS = "business"  # 商务类
+    CATEGORY_SURVEY = "survey"  # 问卷调查类
+    CATEGORY_APPOINTMENT = "appointment"  # 预约类
+    CATEGORY_ORDER = "order"  # 订单类
+    CATEGORY_INFO = "info"  # 信息收集类
+    
+    # 模板注册表
+    _templates: Dict[str, Dict] = {}
+    
+    @classmethod
+    def register(
+        cls,
+        template_id: str,
+        name: str,
+        description: str,
+        category: str,
+        template_func: callable,
+        tags: List[str] = None
+    ):
+        """注册模板"""
+        cls._templates[template_id] = {
+            "id": template_id,
+            "name": name,
+            "description": description,
+            "category": category,
+            "template": template_func,
+            "tags": tags or []
+        }
+    
+    @classmethod
+    def get(cls, template_id: str) -> Optional[Dict]:
+        """获取模板"""
+        return cls._templates.get(template_id)
+    
+    @classmethod
+    def list(cls, category: str = None, tag: str = None) -> List[Dict]:
+        """列出模板"""
+        result = []
+        for template in cls._templates.values():
+            if category and template["category"] != category:
+                continue
+            if tag and tag not in template["tags"]:
+                continue
+            result.append({
+                "id": template["id"],
+                "name": template["name"],
+                "description": template["description"],
+                "category": template["category"],
+                "tags": template["tags"]
+            })
+        return result
+    
+    @classmethod
+    def create(cls, template_id: str, **kwargs) -> Dict:
+        """创建模板实例"""
+        template = cls.get(template_id)
+        if not template:
+            raise ValueError(f"Template not found: {template_id}")
+        
+        return template["template"](**kwargs)
+    
+    @classmethod
+    def get_categories(cls) -> Dict[str, str]:
+        """获取分类"""
+        return {
+            cls.CATEGORY_CUSTOMER_SERVICE: "客服类",
+            cls.CATEGORY_BUSINESS: "商务类",
+            cls.CATEGORY_SURVEY: "问卷调查类",
+            cls.CATEGORY_APPOINTMENT: "预约类",
+            cls.CATEGORY_ORDER: "订单类",
+            cls.CATEGORY_INFO: "信息收集类"
+        }
+
+
+# ==================== 注册内置模板 ====================
+
+def _register_builtin_templates():
+    """注册内置模板"""
+    
+    # 客服类
+    TemplateMarket.register(
+        template_id="cs_welcome",
+        name="客服欢迎",
+        description="标准客服欢迎语卡片",
+        category=TemplateMarket.CATEGORY_CUSTOMER_SERVICE,
+        tags=["客服", "欢迎", "菜单"],
+        template_func=lambda: FeishuCardBuilder() \
+            .set_header("欢迎咨询 🎯", "blue") \
+            .add_div("您好！请问有什么可以帮助您的？") \
+            .add_button_group([
+                {"text": "产品咨询", "type": "default", "callback_id": "cs_product"},
+                {"text": "售后服务", "type": "default", "callback_id": "cs_after_sales"},
+                {"text": "人工客服", "type": "primary", "callback_id": "cs人工"}
+            ]) \
+            .build()
+    )
+    
+    TemplateMarket.register(
+        template_id="cs_menu",
+        name="客服菜单",
+        description="常见问题菜单",
+        category=TemplateMarket.CATEGORY_CUSTOMER_SERVICE,
+        tags=["客服", "菜单", "FAQ"],
+        template_func=lambda: FeishuCardBuilder() \
+            .set_header("常见问题 🔍", "blue") \
+            .add_div("点击下方按钮查看答案") \
+            .add_button("如何下单？", "faq_order", type="default") \
+            .add_button("如何支付？", "faq_pay", type="default") \
+            .add_button("如何退款？", "faq_refund", type="default") \
+            .add_button("联系人工", "cs人工", type="primary") \
+            .build()
+    )
+    
+    # 商务类
+    TemplateMarket.register(
+        template_id="biz_contact",
+        name="商务名片",
+        description="商务联系卡片",
+        category=TemplateMarket.CATEGORY_BUSINESS,
+        tags=["商务", "名片", "联系"],
+        template_func=lambda name="", title="", company="", phone="", email="": 
+            FeishuCardBuilder() \
+            .set_header("商务合作 🤝", "blue") \
+            .add_div(f"**{name}**") \
+            .add_div(f"{title} | {company}") \
+            .add_hr() \
+            .add_button("加微信", f"add_wechat_{phone}", url=f"weixin://contacts/{phone}") \
+            .add_button("发邮件", f"send_email_{email}", url=f"mailto:{email}") \
+            .build()
+    )
+    
+    TemplateMarket.register(
+        template_id="biz_meeting",
+        name="会议邀约",
+        description="会议邀约卡片",
+        category=TemplateMarket.CATEGORY_BUSINESS,
+        tags=["商务", "会议", "邀约"],
+        template_func=lambda title="", time="", link="": 
+            FeishuCardBuilder() \
+            .set_header("会议邀约 📅", "blue") \
+            .add_div(f"**{title}") \
+            .add_div(f"⏰ 时间：{time}") \
+            .add_button("进入会议", "join_meeting", url=link, type="primary") \
+            .add_button("稍后提醒", "remind_meeting") \
+            .build()
+    )
+    
+    # 问卷调查类
+    TemplateMarket.register(
+        template_id="survey_satisfaction",
+        name="满意度调查",
+        description="标准满意度调查",
+        category=TemplateMarket.CATEGORY_SURVEY,
+        tags=["问卷", "调查", "满意度"],
+        template_func=lambda: FeishuCardBuilder() \
+            .set_header("满意度调查 📝", "blue") \
+            .add_div("您对本次服务满意吗？") \
+            .add_button_group([
+                {"text": "非常满意", "callback_id": "sat_5", "value": {"score": 5}},
+                {"text": "满意", "callback_id": "sat_4", "value": {"score": 4}},
+                {"text": "一般", "callback_id": "sat_3", "value": {"score": 3}},
+                {"text": "不满意", "callback_id": "sat_2", "value": {"score": 2}},
+                {"text": "非常不满意", "callback_id": "sat_1", "value": {"score": 1}}
+            ]) \
+            .add_hr() \
+            .add_text_input("改进建议", "suggestion", placeholder="您的建议是我们进步的动力", multiline=True) \
+            .add_button("提交", "survey_submit", type="primary") \
+            .build()
+    )
+    
+    # 预约类
+    TemplateMarket.register(
+        template_id="appointment_general",
+        name="通用预约",
+        description="通用预约表单",
+        category=TemplateMarket.CATEGORY_APPOINTMENT,
+        tags=["预约", "表单", "通用"],
+        template_func=lambda title="预约", fields=None: (
+            (FeishuCardBuilder() \
+                .set_header(title, "blue") 
+                if fields is None or "name" in fields
+                else FeishuCardBuilder().set_header(title, "blue")
+            )
+            .add_text_input("姓名 *", "name", placeholder="请输入姓名") 
+            .add_text_input("电话 *", "phone", placeholder="请输入电话")
+            .add_text_input("邮箱", "email", placeholder="请输入邮箱")
+            .add_text_input("备注", "remark", multiline=True)
+            .add_button("取消", "cancel")
+            .add_button("提交", "submit", type="primary")
+            .build()
+        )
+    )
+    
+    # 订单类
+    TemplateMarket.register(
+        template_id="order_status",
+        name="订单状态",
+        description="订单状态查询卡片",
+        category=TemplateMarket.CATEGORY_ORDER,
+        tags=["订单", "状态", "物流"],
+        template_func=lambda order_no="", status="", items=None: 
+            FeishuCardBuilder() \
+            .set_header("订单查询 📦", "blue") \
+            .add_div(f"**订单号:** {order_no}") \
+            .add_div(f"**状态:** {status}") \
+            .add_hr() \
+            .add_button("查看物流", "view_logistics") \
+            .add_button("申请售后", "after_sales") \
+            .add_button("联系客服", "contact_cs", type="primary") \
+            .build()
+    )
+    
+    TemplateMarket.register(
+        template_id="order_confirm",
+        name="订单确认",
+        description="订单确认卡片",
+        category=TemplateMarket.CATEGORY_ORDER,
+        tags=["订单", "确认", "支付"],
+        template_func=lambda items=None, total=0: 
+            FeishuCardBuilder() \
+            .set_header("订单确认 ✅", "blue") \
+            .add_div("**商品清单:**") \
+            .add_div(items or "商品1 x 1\n商品2 x 2") \
+            .add_hr() \
+            .add_div(f"**合计: ¥{total}**") \
+            .add_button("取消", "cancel_order") \
+            .add_button("去支付", "pay_order", type="primary") \
+            .build()
+    )
+    
+    # 信息收集类
+    TemplateMarket.register(
+        template_id="info_feedback",
+        name="意见反馈",
+        description="意见反馈表单",
+        category=TemplateMarket.CATEGORY_INFO,
+        tags=["反馈", "建议", "联系"],
+        template_func=lambda: 
+            FeishuCardBuilder() \
+            .set_header("意见反馈 💬", "blue") \
+            .add_static_select(
+                "反馈类型", "type",
+                [{"text": "功能建议", "value": "suggestion"},
+                 {"text": "Bug反馈", "value": "bug"},
+                 {"text": "体验问题", "value": "experience"},
+                 {"text": "其他", "value": "other"}]
+            ) \
+            .add_text_input("标题 *", "title", placeholder="请输入标题") \
+            .add_text_input("详细描述 *", "content", placeholder="请详细描述您的问题或建议", multiline=True) \
+            .add_text_input("联系方式", "contact", placeholder="可选，方便我们回复您") \
+            .add_button("提交", "submit_feedback", type="primary") \
+            .build()
+    )
+
+
+# 注册内置模板
+_register_builtin_templates()
+
+
+# ==================== 便捷函数 ====================
+
+def quick_card(template_id: str, **kwargs) -> Dict:
+    """快速创建卡片（模板市场）"""
+    return TemplateMarket.create(template_id, **kwargs)
+
+
+def list_templates(category: str = None) -> List[Dict]:
+    """列出可用模板"""
+    return TemplateMarket.list(category)
+
+
+def get_template(template_id: str) -> Optional[Dict]:
+    """获取模板信息"""
+    return TemplateMarket.get(template_id)
+
+
+# 注册内置模板快捷函数
+register = TemplateMarket.register
