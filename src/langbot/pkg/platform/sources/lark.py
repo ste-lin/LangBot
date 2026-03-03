@@ -32,6 +32,8 @@ import langbot_plugin.api.entities.builtin.platform.events as platform_events
 import langbot_plugin.api.entities.builtin.platform.entities as platform_entities
 import langbot_plugin.api.definition.abstract.platform.event_logger as abstract_platform_logger
 
+from feishu_card import FeishuCardBuilder, FeishuCardManager, CardTemplates
+
 
 class AESCipher(object):
     def __init__(self, key):
@@ -670,6 +672,9 @@ class LarkAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
         cipher = AESCipher(config.get('encrypt-key', ''))
         self.request_app_ticket(api_client, config)
 
+        # 初始化飞书卡片管理器
+        card_manager = FeishuCardManager()
+        
         super().__init__(
             config=config,
             logger=logger,
@@ -681,6 +686,7 @@ class LarkAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             bot=bot,
             api_client=api_client,
             bot_account_id=bot_account_id,
+            card_manager=card_manager,
             cipher=cipher,
             **kwargs,
         )
@@ -1137,6 +1143,88 @@ class LarkAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
                     f'client.im.v1.message.reply ({media["msg_type"]}) failed, code: {response.code}, msg: {response.msg}, log_id: {response.get_log_id()}, resp: \n{json.dumps(json.loads(response.raw.content), indent=4, ensure_ascii=False)}'
                 )
 
+    async def reply_interactive_card(
+        self,
+        message_source: platform_events.MessageEvent,
+        card_content: dict,
+        callback_handlers: dict = None
+    ) -> bool:
+        """
+        发送交互卡片消息并注册回调处理器
+        
+        Args:
+            message_source: 消息事件源
+            card_content: 卡片内容 dict 或 FeishuCardBuilder 构建的结果
+            callback_handlers: 回调处理器字典 {callback_id: handler_function}
+        
+        Returns:
+            是否发送成功
+        """
+        try:
+            message_id = message_source.message_chain.message_id
+            
+            # 如果是 builder 对象，先 build
+            if hasattr(card_content, 'build'):
+                card_content = card_content.build()
+            
+            # 创建卡片
+            card_data = {
+                "type": "card",
+                "data": {
+                    "template_variable": {
+                        "content": json.dumps(card_content, ensure_ascii=False)
+                    }
+                }
+            }
+            
+            # 注册回调处理器
+            if callback_handlers and hasattr(self, 'card_manager'):
+                for callback_id, handler in callback_handlers.items():
+                    self.card_manager.register_handler(callback_id, handler)
+            
+            # 发送卡片消息
+            request = (
+                ReplyMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .content(json.dumps(card_data))
+                    .msg_type('interactive')
+                    .uuid(str(uuid.uuid4()))
+                    .build()
+                )
+                .build()
+            )
+            
+            tenant_key = (
+                message_source.source_platform_object.header.tenant_key
+                if message_source.source_platform_object
+                else self.lark_tenant_key
+            )
+            app_access_token = self.get_app_access_token()
+            tenant_access_token = self.get_tenant_access_token(tenant_key)
+            req_opt = (
+                RequestOption.builder()
+                .app_ticket(self.app_ticket)
+                .tenant_key(tenant_key)
+                .app_access_token(app_access_token)
+                .tenant_access_token(tenant_access_token)
+                .build()
+            )
+            
+            response = await self.api_client.im.v1.message.areply(request, req_opt)
+            
+            if not response.success():
+                raise Exception(
+                    f'reply_interactive_card failed, code: {response.code}, msg: {response.msg}'
+                )
+            
+            return True
+            
+        except Exception as e:
+            await self.logger.error(f'Reply interactive card error: {traceback.format_exc()}')
+            return False
+
     async def reply_message_chunk(
         self,
         message_source: platform_events.MessageEvent,
@@ -1308,6 +1396,12 @@ class LarkAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
 
                 if event.__class__ in self.listeners:
                     await self.listeners[event.__class__](event, self)
+            elif 'im.card.action.callback' == type:
+                # 处理卡片交互回调
+                try:
+                    await self.handle_card_callback(context, data)
+                except Exception as e:
+                    await self.logger.error(f'Error handling card callback: {traceback.format_exc()}')
             elif 'im.chat.member.bot.added_v1' == type:
                 try:
                     bot_added_welcome_msg = self.config.get('bot_added_welcome', '')
@@ -1382,6 +1476,97 @@ class LarkAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
                     await asyncio.sleep(1)
 
             await keep_alive()
+
+    async def handle_card_callback(self, context, data: dict):
+        """处理飞书卡片交互回调"""
+        try:
+            # 解析回调数据
+            action = data.get('action', {})
+            callback_id = action.get('callback_id', '')
+            value = action.get('value', {})
+            
+            # 获取用户信息
+            user_id = data.get('operator', {}).get('user_id', 'unknown')
+            
+            # 获取消息和卡片信息
+            message_id = data.get('message', {}).get('message_id', '')
+            
+            # 调用注册的处理器
+            if hasattr(self, 'card_manager') and callback_id:
+                result = await self.card_manager.handle_callback(callback_id, value, user_id)
+                
+                if result:
+                    # 根据处理结果更新卡片
+                    await self.update_card_with_result(message_id, callback_id, result, user_id)
+            
+            return {'code': 0, 'message': 'success'}
+        except Exception as e:
+            await self.logger.error(f'Card callback error: {traceback.format_exc()}')
+            return {'code': 1, 'message': str(e)}
+    
+    async def update_card_with_result(
+        self, 
+        message_id: str, 
+        callback_id: str, 
+        result: dict, 
+        user_id: str
+    ):
+        """根据处理结果更新卡片"""
+        try:
+            # 构建结果卡片
+            if result.get('type') == 'text':
+                content = result['content']
+            elif result.get('type') == 'card':
+                content = result['content']
+            else:
+                # 默认文本格式
+                items = result.get('items', [])
+                card = CardTemplates.result_card(
+                    result.get('title', '处理结果'),
+                    items
+                )
+                content = json.dumps({
+                    "type": "card",
+                    "data": {
+                        "card_id": self.card_id_dict.get(message_id, ''),
+                        "template_variable": {
+                            "content": json.dumps(card, ensure_ascii=False)
+                        }
+                    }
+                })
+            
+            # 更新卡片消息
+            request = (
+                PatchInteractiveCardRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    PatchInteractiveCardRequestBody.builder()
+                    .card_id(self.card_id_dict.get(message_id, ''))
+                    .content(content)
+                    .build()
+                )
+                .build()
+            )
+            
+            tenant_key = self.lark_tenant_key
+            app_access_token = self.get_app_access_token()
+            tenant_access_token = self.get_tenant_access_token(tenant_key)
+            req_opt = (
+                RequestOption.builder()
+                .app_ticket(self.app_ticket)
+                .tenant_key(tenant_key)
+                .app_access_token(app_access_token)
+                .tenant_access_token(tenant_access_token)
+                .build()
+            )
+            
+            response = await self.api_client.im.v1.card.patch(request, req_opt)
+            
+            if not response.success():
+                await self.logger.error(f'Card update failed: {response.msg}')
+                
+        except Exception as e:
+            await self.logger.error(f'Update card error: {traceback.format_exc()}')
 
     async def kill(self) -> bool:
         # 需要断开连接，不然旧的连接会继续运行，导致飞书消息来时会随机选择一个连接
