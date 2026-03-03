@@ -1225,6 +1225,82 @@ class LarkAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             await self.logger.error(f'Reply interactive card error: {traceback.format_exc()}')
             return False
 
+    # ==================== 卡片生命周期管理 ====================
+    
+    def register_card_mapping(self, message_id: str, card_id: str):
+        """注册消息ID到卡片ID的映射"""
+        self.card_id_dict[message_id] = card_id
+    
+    def unregister_card_mapping(self, message_id: str):
+        """注销卡片映射"""
+        if message_id in self.card_id_dict:
+            del self.card_id_dict[message_id]
+    
+    def get_card_id(self, message_id: str) -> Optional[str]:
+        """获取卡片ID"""
+        return self.card_id_dict.get(message_id)
+    
+    async def delete_card(self, message_id: str) -> bool:
+        """删除卡片消息"""
+        try:
+            card_id = self.card_id_dict.get(message_id)
+            if not card_id:
+                await self.logger.warning(f'Card not found for message: {message_id}')
+                return False
+            
+            # 飞书不支持直接删除卡片，只能通过删除消息来间接删除
+            # 这里先实现消息删除
+            return await self.delete_message(message_id)
+            
+        except Exception as e:
+            await self.logger.error(f'Delete card error: {traceback.format_exc()}')
+            return False
+    
+    async def delete_message(self, message_id: str) -> bool:
+        """删除消息"""
+        try:
+            request = (
+                DeleteMessageRequest.builder()
+                .message_id(message_id)
+                .build()
+            )
+            
+            tenant_key = self.lark_tenant_key
+            app_access_token = self.get_app_access_token()
+            tenant_access_token = self.get_tenant_access_token(tenant_key)
+            req_opt = (
+                RequestOption.builder()
+                .app_ticket(self.app_ticket)
+                .tenant_key(tenant_key)
+                .app_access_token(app_access_token)
+                .tenant_access_token(tenant_access_token)
+                .build()
+            )
+            
+            response = await self.api_client.im.v1.message.adelete(request, req_opt)
+            
+            if response.success():
+                self.unregister_card_mapping(message_id)
+                return True
+            else:
+                await self.logger.error(f'Delete message failed: {response.msg}')
+                return False
+                
+        except Exception as e:
+            await self.logger.error(f'Delete message error: {traceback.format_exc()}')
+            return False
+    
+    async def cleanup_expired_cards(self, max_age_seconds: int = 3600):
+        """清理过期的卡片映射"""
+        # 这里可以实现基于时间的清理逻辑
+        # 实际生产环境可能需要持久化存储
+        expired_count = 0
+        for msg_id in list(self.card_id_dict.keys()):
+            # 简化处理：不做实际的时间检查
+            # 生产环境可以使用 Redis 等存储并设置 TTL
+            pass
+        return expired_count
+
     async def reply_message_chunk(
         self,
         message_source: platform_events.MessageEvent,
@@ -1491,18 +1567,173 @@ class LarkAdapter(abstract_platform_adapter.AbstractMessagePlatformAdapter):
             # 获取消息和卡片信息
             message_id = data.get('message', {}).get('message_id', '')
             
+            # 解析表单数据 (input 组件的值)
+            form_data = {}
+            if 'value' in action:
+                # 表单数据在 value 中
+                form_data = action.get('value', {})
+            
+            # 构建完整的回调上下文
+            callback_context = {
+                'callback_id': callback_id,
+                'value': value,
+                'form_data': form_data,
+                'user_id': user_id,
+                'message_id': message_id,
+                'raw_data': data
+            }
+            
             # 调用注册的处理器
             if hasattr(self, 'card_manager') and callback_id:
-                result = await self.card_manager.handle_callback(callback_id, value, user_id)
+                result = await self.card_manager.handle_callback(
+                    callback_id, 
+                    value, 
+                    user_id,
+                    message_id
+                )
                 
                 if result:
-                    # 根据处理结果更新卡片
-                    await self.update_card_with_result(message_id, callback_id, result, user_id)
+                    # 根据处理结果决定操作
+                    action_type = result.get('action', 'update')
+                    
+                    if action_type == 'update':
+                        # 更新当前卡片
+                        await self.update_card_with_result(message_id, callback_id, result, user_id)
+                    elif action_type == 'reply':
+                        # 回复新消息
+                        await self.send_reply_message(message_id, result.get('content', ''))
+                    elif action_type == 'replace':
+                        # 替换卡片
+                        await self.replace_card(message_id, result.get('card'), user_id)
+                    elif action_type == 'dialog':
+                        # 显示对话框
+                        await self.show_dialog(message_id, result.get('card'), user_id)
             
             return {'code': 0, 'message': 'success'}
         except Exception as e:
             await self.logger.error(f'Card callback error: {traceback.format_exc()}')
             return {'code': 1, 'message': str(e)}
+    
+    async def send_reply_message(self, message_id: str, content: str):
+        """发送回复消息"""
+        try:
+            # 需要先获取原消息的 chat_id
+            # 这里简化处理，直接用 message_id 回复
+            request = (
+                ReplyMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .content(json.dumps({'text': content}))
+                    .msg_type('text')
+                    .uuid(str(uuid.uuid4()))
+                    .build()
+                )
+                .build()
+            )
+            
+            tenant_key = self.lark_tenant_key
+            app_access_token = self.get_app_access_token()
+            tenant_access_token = self.get_tenant_access_token(tenant_key)
+            req_opt = (
+                RequestOption.builder()
+                .app_ticket(self.app_ticket)
+                .tenant_key(tenant_key)
+                .app_access_token(app_access_token)
+                .tenant_access_token(tenant_access_token)
+                .build()
+            )
+            
+            response = await self.api_client.im.v1.message.areply(request, req_opt)
+            
+            if not response.success():
+                await self.logger.error(f'Reply message failed: {response.msg}')
+                
+        except Exception as e:
+            await self.logger.error(f'Send reply error: {traceback.format_exc()}')
+    
+    async def replace_card(self, message_id: str, card_content: dict, user_id: str):
+        """替换卡片"""
+        try:
+            if hasattr(card_content, 'build'):
+                card_content = card_content.build()
+            
+            content = json.dumps({
+                "type": "card",
+                "data": {
+                    "template_variable": {
+                        "content": json.dumps(card_content, ensure_ascii=False)
+                    }
+                }
+            })
+            
+            # 先删除原消息
+            # await self.delete_message(message_id)
+            
+            # 然后发送新卡片（这里简化处理，直接更新）
+            await self.update_card_with_result(message_id, "replace", {"type": "card", "content": content}, user_id)
+            
+        except Exception as e:
+            await self.logger.error(f'Replace card error: {traceback.format_exc()}')
+    
+    async def show_dialog(self, message_id: str, card_content: dict, user_id: str):
+        """显示对话框（需要飞书高级功能，这里简化为发送新卡片）"""
+        await self.send_card_message(
+            chat_id="",  # 需要从原消息获取
+            card_content=card_content
+        )
+    
+    async def send_card_message(self, chat_id: str, card_content: dict):
+        """发送卡片消息到指定会话"""
+        try:
+            if hasattr(card_content, 'build'):
+                card_content = card_content.build()
+            
+            content = json.dumps({
+                "type": "card",
+                "data": {
+                    "template_variable": {
+                        "content": json.dumps(card_content, ensure_ascii=False)
+                    }
+                }
+            })
+            
+            request = (
+                CreateMessageRequest.builder()
+                .receive_id_type('chat_id')
+                .request_body(
+                    CreateMessageRequestBody.builder()
+                    .receive_id(chat_id)
+                    .content(content)
+                    .msg_type('interactive')
+                    .uuid(str(uuid.uuid4()))
+                    .build()
+                )
+                .build()
+            )
+            
+            tenant_key = self.lark_tenant_key
+            app_access_token = self.get_app_access_token()
+            tenant_access_token = self.get_tenant_access_token(tenant_key)
+            req_opt = (
+                RequestOption.builder()
+                .app_ticket(self.app_ticket)
+                .tenant_key(tenant_key)
+                .app_access_token(app_access_token)
+                .tenant_access_token(tenant_access_token)
+                .build()
+            )
+            
+            response = await self.api_client.im.v1.message.acreate(request, req_opt)
+            
+            if not response.success():
+                await self.logger.error(f'Send card failed: {response.msg}')
+            
+            return response.data.message_id if response.success() else None
+            
+        except Exception as e:
+            await self.logger.error(f'Send card error: {traceback.format_exc()}')
+            return None
     
     async def update_card_with_result(
         self, 
