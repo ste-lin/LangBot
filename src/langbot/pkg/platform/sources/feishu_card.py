@@ -270,6 +270,76 @@ class FeishuCardBuilder:
         self.elements.append(element)
         return self
     
+    def add_pulled_merge_select(
+        self,
+        label: str,
+        callback_id: str,
+        options: List[Dict],
+        placeholder: str = "请选择",
+        initial_value: Optional[str] = None,
+        expand: int = 1
+    ) -> "FeishuCardBuilder":
+        """添加可拉取合并的选择器（支持动态加载更多选项）"""
+        element: Dict = {
+            "tag": "input",
+            "label": {
+                "tag": "plain_text",
+                "content": label
+            },
+            "element": {
+                "tag": "pulled_merge_select",
+                "placeholder": {
+                    "tag": "plain_text",
+                    "content": "请选择或搜索"
+                },
+                "options": [
+                    {
+                        "text": {
+                            "tag": "plain_text",
+                            "content": opt["text"]
+                        },
+                        "value": opt["value"]
+                    }
+                    for opt in options[:20]  # 初始显示20个
+                ],
+                "expand": expand,
+                "placeholder": {
+                    "tag": "plain_text", 
+                    "content": placeholder
+                }
+            }
+        }
+        
+        if initial_value:
+            element["element"]["initial_value"] = initial_value
+        
+        element["callback_id"] = callback_id
+        
+        self.elements.append(element)
+        return self
+    
+    def add_overflow(
+        self,
+        options: List[Dict]
+    ) -> "FeishuCardBuilder":
+        """添加溢出菜单（更多操作）"""
+        self.elements.append({
+            "tag": "overflow",
+            "actions": [
+                {
+                    "tag": "option",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": opt["text"]
+                    },
+                    "value": opt.get("value", opt["text"]),
+                    "url": opt.get("url", "")
+                }
+                for opt in options
+            ]
+        })
+        return self
+    
     # ==================== 输入框组件 ====================
     
     def add_text_input(
@@ -562,6 +632,383 @@ class FeishuCardManager:
         ]
         for k in expired:
             del self.card_states[k]
+
+
+# ==================== 表单验证 ====================
+
+class FormValidator:
+    """表单验证器"""
+    
+    # 验证规则类型
+    RULE_REQUIRED = "required"
+    RULE_MIN_LENGTH = "min_length"
+    RULE_MAX_LENGTH = "max_length"
+    RULE_PATTERN = "pattern"
+    RULE_MIN = "min"
+    RULE_MAX = "max"
+    RULE_EMAIL = "email"
+    RULE_PHONE = "phone"
+    RULE_URL = "url"
+    
+    # 内置验证规则
+    BUILTIN_RULES = {
+        "email": {
+            "pattern": r'^[\w\.-]+@[\w\.-]+\.\w+$',
+            "message": "请输入有效的邮箱地址"
+        },
+        "phone": {
+            "pattern": r'^1[3-9]\d{9}$',
+            "message": "请输入有效的手机号"
+        },
+        "url": {
+            "pattern": r'^https?://[\w\.-]+',
+            "message": "请输入有效的URL"
+        },
+        "id_card": {
+            "pattern": r'^\d{17}[\dXx]$',
+            "message": "请输入有效的身份证号码"
+        }
+    }
+    
+    @staticmethod
+    def validate(value: Any, rules: List[Dict]) -> Dict:
+        """
+        验证值
+        
+        Args:
+            value: 要验证的值
+            rules: 验证规则列表
+            
+        Returns:
+            {"valid": bool, "message": "错误信息"}
+        """
+        for rule in rules:
+            rule_type = rule.get("type")
+            
+            # 必填验证
+            if rule_type == FormValidator.RULE_REQUIRED:
+                if value is None or str(value).strip() == "":
+                    return {
+                        "valid": False,
+                        "message": rule.get("message", "此项为必填项")
+                    }
+            
+            # 最小长度
+            elif rule_type == FormValidator.RULE_MIN_LENGTH:
+                if value is not None and len(str(value)) < rule.get("min", 0):
+                    return {
+                        "valid": False,
+                        "message": rule.get("message", f"长度不能少于{rule.get('min')}个字符")
+                    }
+            
+            # 最大长度
+            elif rule_type == FormValidator.RULE_MAX_LENGTH:
+                if value is not None and len(str(value)) > rule.get("max", 0):
+                    return {
+                        "valid": False,
+                        "message": rule.get("message", f"长度不能超过{rule.get('max')}个字符")
+                    }
+            
+            # 正则验证
+            elif rule_type == FormValidator.RULE_PATTERN:
+                import re
+                pattern = rule.get("pattern")
+                if value is not None and not re.match(pattern, str(value)):
+                    return {
+                        "valid": False,
+                        "message": rule.get("message", "格式不正确")
+                    }
+            
+            # 最小值
+            elif rule_type == FormValidator.RULE_MIN:
+                try:
+                    if value is not None and float(value) < rule.get("min", 0):
+                        return {
+                            "valid": False,
+                            "message": rule.get("message", f"值不能小于{rule.get('min')}")
+                        }
+                except (ValueError, TypeError):
+                    return {"valid": False, "message": "请输入有效的数字"}
+            
+            # 最大值
+            elif rule_type == FormValidator.RULE_MAX:
+                try:
+                    if value is not None and float(value) > rule.get("max", 0):
+                        return {
+                            "valid": False,
+                            "message": rule.get("message", f"值不能大于{rule.get('max')}")
+                        }
+                except (ValueError, TypeError):
+                    return {"valid": False, "message": "请输入有效的数字"}
+            
+            # 内置规则
+            elif rule_type in FormValidator.BUILTIN_RULES:
+                import re
+                rule_def = FormValidator.BUILTIN_RULES[rule_type]
+                if value is not None and not re.match(rule_def["pattern"], str(value)):
+                    return {
+                        "valid": False,
+                        "message": rule.get("message", rule_def["message"])
+                    }
+        
+        return {"valid": True, "message": ""}
+    
+    @staticmethod
+    def validate_form(form_data: Dict, schema: Dict) -> Dict:
+        """
+        验证整个表单
+        
+        Args:
+            form_data: 表单数据 {callback_id: value}
+            schema: 表单Schema {callback_id: {label, rules: []}}
+            
+        Returns:
+            {"valid": bool, "errors": {callback_id: message}}
+        """
+        errors = {}
+        
+        for field_id, field_def in schema.items():
+            value = form_data.get(field_id, "")
+            rules = field_def.get("rules", [])
+            label = field_def.get("label", field_id)
+            
+            # 添加必填规则
+            if field_def.get("required", False):
+                rules.insert(0, {
+                    "type": FormValidator.RULE_REQUIRED,
+                    "message": f"{label}为必填项"
+                })
+            
+            # 执行验证
+            result = FormValidator.validate(value, rules)
+            if not result["valid"]:
+                errors[field_id] = result["message"]
+        
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors
+        }
+
+
+# ==================== 多轮对话状态机 ====================
+
+class ConversationState:
+    """对话状态"""
+    PENDING = "pending"      # 等待用户输入
+    IN_PROGRESS = "progress"  # 进行中
+    COMPLETED = "completed"   # 已完成
+    CANCELLED = "cancelled" # 已取消
+    TIMEOUT = "timeout"     # 超时
+
+
+class ConversationContext:
+    """对话上下文"""
+    
+    def __init__(
+        self,
+        conversation_id: str,
+        user_id: str,
+        initial_state: str = ConversationState.PENDING,
+        ttl: int = 600
+    ):
+        self.conversation_id = conversation_id
+        self.user_id = user_id
+        self.state = initial_state
+        self.data: Dict = {}
+        self.history: List[Dict] = []
+        self.created_at = None
+        self.updated_at = None
+        self.ttl = ttl
+        
+        import time
+        self.created_at = time.time()
+        self.updated_at = time.time()
+    
+    def set_state(self, state: str):
+        """设置状态"""
+        self.state = state
+        self.touch()
+    
+    def set_data(self, key: str, value: Any):
+        """设置数据"""
+        self.data[key] = value
+        self.touch()
+    
+    def get_data(self, key: str, default: Any = None) -> Any:
+        """获取数据"""
+        return self.data.get(key, default)
+    
+    def add_history(self, action: str, data: Dict):
+        """添加历史记录"""
+        import time
+        self.history.append({
+            "action": action,
+            "data": data,
+            "timestamp": time.time()
+        })
+    
+    def touch(self):
+        """更新最后活跃时间"""
+        import time
+        self.updated_at = time.time()
+    
+    def is_expired(self) -> bool:
+        """检查是否过期"""
+        import time
+        return time.time() - self.updated_at > self.ttl
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        return {
+            "conversation_id": self.conversation_id,
+            "user_id": self.user_id,
+            "state": self.state,
+            "data": self.data,
+            "history": self.history,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at
+        }
+
+
+class ConversationStateMachine:
+    """多轮对话状态机"""
+    
+    def __init__(self, default_ttl: int = 600):
+        self.conversations: Dict[str, ConversationContext] = {}
+        self.default_ttl = default_ttl
+        self.handlers: Dict[str, Callable] = {}
+    
+    def start_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+        initial_data: Dict = None
+    ) -> ConversationContext:
+        """开始一个新对话"""
+        ctx = ConversationContext(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            ttl=self.default_ttl
+        )
+        
+        if initial_data:
+            for key, value in initial_data.items():
+                ctx.set_data(key, value)
+        
+        ctx.add_history("start", {"conversation_id": conversation_id})
+        self.conversations[conversation_id] = ctx
+        
+        return ctx
+    
+    def get_conversation(self, conversation_id: str) -> Optional[ConversationContext]:
+        """获取对话上下文"""
+        ctx = self.conversations.get(conversation_id)
+        
+        if ctx is None:
+            return None
+        
+        # 检查是否过期
+        if ctx.is_expired():
+            self.end_conversation(conversation_id, ConversationState.TIMEOUT)
+            return None
+        
+        return ctx
+    
+    def update_state(
+        self,
+        conversation_id: str,
+        state: str,
+        data: Dict = None
+    ) -> Optional[ConversationContext]:
+        """更新对话状态"""
+        ctx = self.get_conversation(conversation_id)
+        
+        if ctx is None:
+            return None
+        
+        ctx.set_state(state)
+        
+        if data:
+            for key, value in data.items():
+                ctx.set_data(key, value)
+            ctx.add_history("update_state", {"state": state, "data": data})
+        
+        return ctx
+    
+    def end_conversation(
+        self,
+        conversation_id: str,
+        final_state: str = ConversationState.COMPLETED
+    ) -> Optional[ConversationContext]:
+        """结束对话"""
+        ctx = self.conversations.get(conversation_id)
+        
+        if ctx:
+            ctx.set_state(final_state)
+            ctx.add_history("end", {"final_state": final_state})
+        
+        return ctx
+    
+    def delete_conversation(self, conversation_id: str):
+        """删除对话"""
+        if conversation_id in self.conversations:
+            del self.conversations[conversation_id]
+    
+    def register_handler(
+        self,
+        action: str,
+        handler: Callable[[ConversationContext, Dict], Dict]
+    ):
+        """注册动作处理器"""
+        self.handlers[action] = handler
+    
+    async def handle_action(
+        self,
+        conversation_id: str,
+        action: str,
+        params: Dict = None
+    ) -> Optional[Dict]:
+        """处理动作"""
+        ctx = self.get_conversation(conversation_id)
+        
+        if ctx is None:
+            return {"error": "对话不存在或已过期"}
+        
+        if action not in self.handlers:
+            return {"error": f"未找到处理器: {action}"}
+        
+        handler = self.handlers[action]
+        
+        try:
+            result = await handler(ctx, params or {})
+            ctx.add_history(action, params or {})
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+    
+    def cleanup_expired(self):
+        """清理过期对话"""
+        expired = [
+            cid for cid, ctx in self.conversations.items()
+            if ctx.is_expired()
+        ]
+        
+        for cid in expired:
+            self.end_conversation(cid, ConversationState.TIMEOUT)
+        
+        return len(expired)
+    
+    def get_active_conversations(self, user_id: str = None) -> List[ConversationContext]:
+        """获取活跃对话"""
+        result = []
+        
+        for ctx in self.conversations.values():
+            if ctx.state in (ConversationState.PENDING, ConversationState.IN_PROGRESS):
+                if user_id is None or ctx.user_id == user_id:
+                    if not ctx.is_expired():
+                        result.append(ctx)
+        
+        return result
 
 
 # ==================== 预置模板 ====================
